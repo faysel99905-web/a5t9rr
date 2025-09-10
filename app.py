@@ -1,20 +1,29 @@
 from flask import Flask, request, render_template_string
-from transformers import pipeline
 from PIL import Image
-import pytesseract
 import os
 import io
 import PyPDF2
 import pandas as pd
 from docx import Document
 import tempfile
+import re
 
-# Set Tesseract path for Windows
-pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
-
-# Initialize pipelines
-qa_pipeline = pipeline("document-question-answering", model="impira/layoutlm-document-qa")
-summarizer = pipeline("summarization", model="facebook/bart-large-cnn")
+# Try to import AI libraries, but make them optional for deployment
+try:
+    from transformers import pipeline
+    import pytesseract
+    # Set Tesseract path for Windows
+    pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
+    
+    # Initialize pipelines
+    qa_pipeline = pipeline("document-question-answering", model="impira/layoutlm-document-qa")
+    summarizer = pipeline("summarization", model="facebook/bart-large-cnn")
+    AI_AVAILABLE = True
+except ImportError:
+    print("AI libraries not available - running in basic mode")
+    qa_pipeline = None
+    summarizer = None
+    AI_AVAILABLE = False
 
 app = Flask(__name__)
 
@@ -433,6 +442,10 @@ def extract_text_from_word(file_stream):
 def extract_text_from_image(file_stream):
     """Extract text from image using OCR"""
     try:
+        if not AI_AVAILABLE or pytesseract is None:
+            # Fallback: return a message that OCR is not available
+            return "OCR (Optical Character Recognition) is not available in this deployment. Please upload PDF, Word, or Excel files for text extraction."
+        
         image = Image.open(file_stream)
         if image.mode != 'RGB':
             image = image.convert('RGB')
@@ -482,7 +495,23 @@ def process_document(file_stream, filename):
 def generate_summary(text, summary_type="medium"):
     """Generate summary of the text"""
     try:
-        # Limit text length for summarization
+        if not AI_AVAILABLE or summarizer is None:
+            # Fallback to simple text summarization
+            sentences = text.split('.')
+            if len(sentences) <= 3:
+                return text
+            
+            # Take first few sentences as summary
+            if summary_type == "short":
+                summary_sentences = sentences[:2]
+            elif summary_type == "medium":
+                summary_sentences = sentences[:3]
+            else:  # long
+                summary_sentences = sentences[:5]
+            
+            return '. '.join(summary_sentences) + '.'
+        
+        # Use AI summarizer if available
         max_length = 1024
         if len(text) > max_length:
             text = text[:max_length]
@@ -530,35 +559,38 @@ def index():
                     if not question:
                         error = "Please enter a question."
                     else:
-                        # For text-based documents, we'll use a different approach
-                        # since the document QA pipeline is designed for images
                         if len(text.strip()) == 0:
                             error = "No text could be extracted from the document."
                         else:
-                            # Simple keyword-based answer for text documents
-                            answer = f"📋 Question: {question}\n\n💡 Answer: Based on the document content, here's what I found:\n\n"
-                            
-                            # Simple search for keywords in the text
-                            question_lower = question.lower()
-                            text_lower = text.lower()
-                            
-                            # Look for relevant sentences
-                            sentences = text.split('.')
-                            relevant_sentences = []
-                            
-                            for sentence in sentences:
-                                if any(word in sentence.lower() for word in question_lower.split()):
-                                    relevant_sentences.append(sentence.strip())
-                            
-                            if relevant_sentences:
-                                answer += "Relevant information found:\n"
-                                for i, sentence in enumerate(relevant_sentences[:3]):
-                                    answer += f"• {sentence}\n"
+                            # Check if this is an image and AI is not available
+                            file_ext = file.filename.rsplit('.', 1)[1].lower() if '.' in file.filename else ''
+                            if file_ext in ['png', 'jpg', 'jpeg', 'gif', 'bmp', 'tiff'] and not AI_AVAILABLE:
+                                answer = f"📋 Question: {question}\n\n⚠️ AI-powered document question answering is not available in this deployment.\n\nFor images, please use PDF, Word, or Excel files for text-based question answering.\n\n📄 Document Info: {file_info.get('name', 'Unknown')} ({file_info.get('size', 'Unknown size')})"
                             else:
-                                answer += "No specific information found for your question. Here's a preview of the document content:\n\n"
-                                answer += text[:500] + "..." if len(text) > 500 else text
-                            
-                            answer += f"\n\n📊 Document contains {len(text.split())} words and {len(text.split('.'))} sentences."
+                                # Simple keyword-based answer for text documents
+                                answer = f"📋 Question: {question}\n\n💡 Answer: Based on the document content, here's what I found:\n\n"
+                                
+                                # Simple search for keywords in the text
+                                question_lower = question.lower()
+                                text_lower = text.lower()
+                                
+                                # Look for relevant sentences
+                                sentences = text.split('.')
+                                relevant_sentences = []
+                                
+                                for sentence in sentences:
+                                    if any(word in sentence.lower() for word in question_lower.split()):
+                                        relevant_sentences.append(sentence.strip())
+                                
+                                if relevant_sentences:
+                                    answer += "Relevant information found:\n"
+                                    for i, sentence in enumerate(relevant_sentences[:3]):
+                                        answer += f"• {sentence}\n"
+                                else:
+                                    answer += "No specific information found for your question. Here's a preview of the document content:\n\n"
+                                    answer += text[:500] + "..." if len(text) > 500 else text
+                                
+                                answer += f"\n\n📊 Document contains {len(text.split())} words and {len(text.split('.'))} sentences."
                 
                 elif action == "summary":
                     summary_type = request.form.get("summary_type", "medium")
