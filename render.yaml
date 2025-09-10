@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: a5t9r-document-qa
+    env: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn --bind 0.0.0.0:$PORT --timeout 120 --workers 1 --threads 2 app:app
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.0
+      - key: PORT
+        value: 10000
+    healthCheckPath: /
